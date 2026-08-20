@@ -75,7 +75,7 @@ fn run(cli: Cli) -> Result<()> {
         Command::Rm(args) => {
             let force_worktree = args.force || args.force_worktree;
             let force_branch = args.force || args.force_branch;
-            let removed = manager.remove(
+            let plan = manager.plan_removal(
                 &args.name,
                 RemoveOptions {
                     keep_branch: args.keep_branch,
@@ -83,10 +83,59 @@ fn run(cli: Cli) -> Result<()> {
                     force_branch,
                 },
             )?;
-            if args.json {
-                print_json(&removed)?;
+            if args.dry_run {
+                if args.json {
+                    print_json(&plan.preview())?;
+                } else {
+                    println!("Would remove {}", plan.name);
+                    println!("Path: {}", plan.path.display());
+                    match plan.branch.as_deref() {
+                        Some(branch) if plan.branch_deleted => {
+                            println!("Branch: {branch} (would delete)");
+                        }
+                        Some(branch) if plan.keep_branch => {
+                            println!("Branch: {branch} (would retain because --keep-branch)");
+                        }
+                        Some(branch) => println!("Branch: {branch} (would retain)"),
+                        None => println!("Branch: detached (none to delete)"),
+                    }
+                    let worktree_authorization = if plan.worktree_force_authorized {
+                        "authorized"
+                    } else {
+                        "not authorized"
+                    };
+                    let worktree_reason = if plan.worktree_dirty {
+                        "dirty"
+                    } else if plan.worktree_locked {
+                        "locked"
+                    } else {
+                        "not required"
+                    };
+                    println!(
+                        "Worktree force: {worktree_authorization} (required: {worktree_reason})"
+                    );
+                    println!("Branch merge: {}", plan.branch_merge_status);
+                    let branch_authorization = if plan.branch_force_authorized {
+                        "authorized"
+                    } else {
+                        "not authorized"
+                    };
+                    let branch_reason = match plan.branch_merge_status {
+                        session::BranchMergeStatus::Unmerged => "unmerged",
+                        session::BranchMergeStatus::Unknown => "unknown",
+                        session::BranchMergeStatus::Merged
+                        | session::BranchMergeStatus::NotApplicable => "not required",
+                    };
+                    println!("Branch force: {branch_authorization} (required: {branch_reason})");
+                    println!("Nothing changed (dry run)");
+                }
             } else {
-                println!("Removed {}", removed.name);
+                let removed = manager.execute_removal(plan)?;
+                if args.json {
+                    print_json(&removed)?;
+                } else {
+                    println!("Removed {}", removed.name);
+                }
             }
         }
         Command::Prune(args) => {

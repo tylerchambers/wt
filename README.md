@@ -151,6 +151,20 @@ Keep the branch after removing its worktree:
 wt rm fix-auth-race --keep-branch
 ```
 
+Preview the same safety checks and planned worktree/branch actions without changing the
+worktree, branch, lock state, or `wt` metadata:
+
+```bash
+wt rm fix-auth-race --dry-run
+wt rm fix-auth-race --dry-run --json
+```
+
+Dry-run accepts the same `--keep-branch` and force options as real removal. It refuses
+dirty, locked, missing, main-worktree, unknown-base, and unmerged-branch cases under the
+same rules. Force-enabled previews report whether each destructive authorization was
+provided and whether the current state requires it; they never perform the authorized
+action.
+
 Explicit destructive overrides are granular:
 
 ```bash

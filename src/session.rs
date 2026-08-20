@@ -120,6 +120,84 @@ pub struct RemoveOptions {
     pub force_branch: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BranchMergeStatus {
+    Merged,
+    Unmerged,
+    Unknown,
+    NotApplicable,
+}
+
+impl fmt::Display for BranchMergeStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Merged => "merged",
+            Self::Unmerged => "unmerged",
+            Self::Unknown => "unknown",
+            Self::NotApplicable => "not applicable",
+        };
+        formatter.write_str(value)
+    }
+}
+
+#[derive(Debug)]
+pub struct RemovalPlan {
+    pub name: String,
+    pub branch: Option<String>,
+    pub path: PathBuf,
+    pub branch_deleted: bool,
+    pub keep_branch: bool,
+    pub base: Option<String>,
+    pub worktree_force_authorized: bool,
+    pub worktree_force_required: bool,
+    pub branch_force_authorized: bool,
+    pub branch_force_required: bool,
+    pub branch_merge_status: BranchMergeStatus,
+    pub worktree_dirty: bool,
+    pub worktree_locked: bool,
+    options: RemoveOptions,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovalPreview<'a> {
+    pub dry_run: bool,
+    pub name: &'a str,
+    pub branch: Option<&'a str>,
+    pub path: &'a Path,
+    pub base: Option<&'a str>,
+    pub branch_deleted: bool,
+    pub branch_retained: bool,
+    pub force_worktree_authorized: bool,
+    pub force_worktree_required: bool,
+    pub force_branch_authorized: bool,
+    pub force_branch_required: bool,
+    pub branch_merge_status: BranchMergeStatus,
+    pub worktree_dirty: bool,
+    pub worktree_locked: bool,
+}
+
+impl RemovalPlan {
+    pub fn preview(&self) -> RemovalPreview<'_> {
+        RemovalPreview {
+            dry_run: true,
+            name: &self.name,
+            branch: self.branch.as_deref(),
+            path: &self.path,
+            base: self.base.as_deref(),
+            branch_deleted: self.branch_deleted,
+            branch_retained: self.branch.is_some() && !self.branch_deleted,
+            force_worktree_authorized: self.worktree_force_authorized,
+            force_worktree_required: self.worktree_force_required,
+            force_branch_authorized: self.branch_force_authorized,
+            force_branch_required: self.branch_force_required,
+            branch_merge_status: self.branch_merge_status,
+            worktree_dirty: self.worktree_dirty,
+            worktree_locked: self.worktree_locked,
+        }
+    }
+}
+
 pub struct SessionManager {
     repository: Repository,
     config: Config,
@@ -269,7 +347,7 @@ impl SessionManager {
         })
     }
 
-    pub fn remove(&self, name: &str, options: RemoveOptions) -> Result<RemovedSession> {
+    pub fn plan_removal(&self, name: &str, options: RemoveOptions) -> Result<RemovalPlan> {
         let name = SessionName::parse(name)?;
         let worktree = self.resolve(&name)?;
         if worktree.path == self.repository.main_root {
@@ -292,37 +370,79 @@ impl SessionManager {
         };
         let delete_branch =
             branch.is_some() && self.config.delete_merged_branches && !options.keep_branch;
+        let mut base = None;
+        let mut branch_merge_status = BranchMergeStatus::NotApplicable;
         if let Some(branch) = branch.as_deref().filter(|_| delete_branch) {
+            base = match self.base_for(&name, branch) {
+                Ok(base) => base,
+                Err(_) if options.force_branch => None,
+                Err(error) => return Err(error),
+            };
+            branch_merge_status = match base.as_deref() {
+                Some(base) => match self.repository.is_ancestor(branch, base) {
+                    Ok(true) => BranchMergeStatus::Merged,
+                    Ok(false) => BranchMergeStatus::Unmerged,
+                    Err(_) if options.force_branch => BranchMergeStatus::Unknown,
+                    Err(error) => return Err(error),
+                },
+                None => BranchMergeStatus::Unknown,
+            };
             if !options.force_branch {
-                let base = self
-                    .base_for(&name, branch)?
-                    .ok_or_else(|| Error::BaseUnknown(name.to_string()))?;
-                if !self.repository.is_ancestor(branch, &base)? {
-                    return Err(Error::BranchNotMerged {
-                        branch: branch.to_owned(),
-                        base,
-                    });
+                match branch_merge_status {
+                    BranchMergeStatus::Unmerged => {
+                        return Err(Error::BranchNotMerged {
+                            branch: branch.to_owned(),
+                            base: base.expect("unmerged status requires a base"),
+                        });
+                    }
+                    BranchMergeStatus::Unknown => {
+                        return Err(Error::BaseUnknown(name.to_string()));
+                    }
+                    BranchMergeStatus::Merged | BranchMergeStatus::NotApplicable => {}
                 }
             }
         }
+        let branch_force_required = matches!(
+            branch_merge_status,
+            BranchMergeStatus::Unmerged | BranchMergeStatus::Unknown
+        );
 
-        if worktree.locked {
-            self.repository.unlock_worktree(&worktree.path)?;
-        }
-        self.repository
-            .remove_worktree(&worktree.path, options.force_worktree)?;
-        self.metadata.remove(name.as_str())?;
-
-        if let Some(branch) = branch.as_deref().filter(|_| delete_branch) {
-            self.repository
-                .delete_branch(branch, options.force_branch)?;
-        }
-
-        Ok(RemovedSession {
+        Ok(RemovalPlan {
             name: name.to_string(),
             branch,
             path: worktree.path,
             branch_deleted: delete_branch,
+            keep_branch: options.keep_branch,
+            base,
+            worktree_force_authorized: options.force_worktree,
+            worktree_force_required: dirty || worktree.locked,
+            branch_force_authorized: options.force_branch,
+            branch_force_required,
+            branch_merge_status,
+            worktree_dirty: dirty,
+            worktree_locked: worktree.locked,
+            options,
+        })
+    }
+
+    pub fn execute_removal(&self, plan: RemovalPlan) -> Result<RemovedSession> {
+        if plan.worktree_locked {
+            self.repository.unlock_worktree(&plan.path)?;
+        }
+        self.repository
+            .remove_worktree(&plan.path, plan.options.force_worktree)?;
+        self.metadata.remove(&plan.name)?;
+
+        if let Some(branch) = plan.branch.as_deref().filter(|_| plan.branch_deleted) {
+            self.repository
+                .delete_branch(branch, plan.options.force_branch)?;
+        }
+
+        Ok(RemovedSession {
+            name: plan.name,
+            branch: plan.branch,
+            path: plan.path,
+            branch_deleted: plan.branch_deleted,
         })
     }
 

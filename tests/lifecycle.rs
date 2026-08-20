@@ -186,6 +186,338 @@ fn removal_refuses_dirty_work_and_requires_a_separate_explicit_force() {
 }
 
 #[test]
+fn dry_run_previews_clean_merged_removal_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    let common_dir = repo.git(
+        &repo.root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    assert_success(&common_dir);
+    let metadata =
+        std::path::Path::new(stdout(&common_dir).trim()).join("wt/sessions/70726576696577.json");
+    let metadata_before = fs::read(&metadata).expect("read preview metadata");
+
+    let preview = repo.wt(&repo.root, ["rm", "preview", "--dry-run"]);
+
+    assert_success(&preview);
+    assert_eq!(
+        stdout(&preview),
+        format!(
+            "Would remove preview\nPath: {path}\nBranch: preview (would delete)\nWorktree force: not authorized (required: not required)\nBranch merge: merged\nBranch force: not authorized (required: not required)\nNothing changed (dry run)\n"
+        )
+    );
+    assert!(std::path::Path::new(&path).is_dir());
+    let branch = repo.git(&repo.root, ["show-ref", "--verify", "refs/heads/preview"]);
+    assert_success(&branch);
+    assert_eq!(
+        fs::read(&metadata).expect("reread preview metadata"),
+        metadata_before
+    );
+    let listed = repo.wt(&repo.root, ["path", "preview"]);
+    assert_success(&listed);
+    assert_eq!(stdout(&listed), format!("{path}\n"));
+}
+
+#[test]
+fn dry_run_keep_branch_previews_retention_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "kept-preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+
+    let preview = repo.wt(
+        &repo.root,
+        ["rm", "kept-preview", "--dry-run", "--keep-branch"],
+    );
+
+    assert_success(&preview);
+    assert!(stdout(&preview).contains("Branch: kept-preview (would retain because --keep-branch)"));
+    assert!(stdout(&preview).contains("Branch merge: not applicable"));
+    assert!(stdout(&preview).contains("Nothing changed (dry run)"));
+    assert!(std::path::Path::new(&path).is_dir());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/kept-preview"],
+    );
+    assert_success(&branch);
+    let resolved = repo.wt(&repo.root, ["path", "kept-preview"]);
+    assert_success(&resolved);
+    assert_eq!(stdout(&resolved), format!("{path}\n"));
+}
+
+#[test]
+fn dry_run_dirty_refusal_requires_worktree_force_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "dirty-preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    fs::write(
+        std::path::Path::new(&path).join("dirty.txt"),
+        "not committed\n",
+    )
+    .expect("write dirty preview file");
+
+    let refused = repo.wt(
+        &repo.root,
+        ["rm", "dirty-preview", "--dry-run", "--force-branch"],
+    );
+
+    assert_failure(
+        &refused,
+        "worktree 'dirty-preview' has uncommitted changes; use --force-worktree or --force",
+    );
+    assert!(std::path::Path::new(&path).join("dirty.txt").is_file());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/dirty-preview"],
+    );
+    assert_success(&branch);
+    let resolved = repo.wt(&repo.root, ["path", "dirty-preview"]);
+    assert_success(&resolved);
+    assert_eq!(stdout(&resolved), format!("{path}\n"));
+}
+
+#[test]
+fn dry_run_unmerged_refusal_requires_branch_force_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "unmerged-preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    fs::write(
+        std::path::Path::new(&path).join("feature.txt"),
+        "committed only on feature\n",
+    )
+    .expect("write feature file");
+    assert_success(&repo.git(std::path::Path::new(&path), ["add", "feature.txt"]));
+    assert_success(&repo.git(
+        std::path::Path::new(&path),
+        ["commit", "-m", "unmerged preview"],
+    ));
+
+    let refused = repo.wt(
+        &repo.root,
+        ["rm", "unmerged-preview", "--dry-run", "--force-worktree"],
+    );
+
+    assert_failure(
+        &refused,
+        "branch 'unmerged-preview' contains commits not merged into 'main'; use --force-branch or --force",
+    );
+    assert!(std::path::Path::new(&path).join("feature.txt").is_file());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/unmerged-preview"],
+    );
+    assert_success(&branch);
+    let resolved = repo.wt(&repo.root, ["path", "unmerged-preview"]);
+    assert_success(&resolved);
+    assert_eq!(stdout(&resolved), format!("{path}\n"));
+}
+
+#[test]
+fn dry_run_force_reports_destructive_authorization_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "forced-preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    fs::write(
+        std::path::Path::new(&path).join("feature.txt"),
+        "unmerged commit\n",
+    )
+    .expect("write feature file");
+    assert_success(&repo.git(std::path::Path::new(&path), ["add", "feature.txt"]));
+    assert_success(&repo.git(
+        std::path::Path::new(&path),
+        ["commit", "-m", "unmerged forced preview"],
+    ));
+    fs::write(
+        std::path::Path::new(&path).join("dirty.txt"),
+        "uncommitted work\n",
+    )
+    .expect("write dirty file");
+
+    let preview = repo.wt(&repo.root, ["rm", "forced-preview", "--dry-run", "--force"]);
+
+    assert_success(&preview);
+    let output = stdout(&preview);
+    assert!(output.contains("Worktree force: authorized (required: dirty)"));
+    assert!(output.contains("Branch merge: unmerged"));
+    assert!(output.contains("Branch force: authorized (required: unmerged)"));
+    assert!(output.contains("Nothing changed (dry run)"));
+    assert!(std::path::Path::new(&path).join("dirty.txt").is_file());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/forced-preview"],
+    );
+    assert_success(&branch);
+    let resolved = repo.wt(&repo.root, ["path", "forced-preview"]);
+    assert_success(&resolved);
+    assert_eq!(stdout(&resolved), format!("{path}\n"));
+}
+
+#[test]
+fn dry_run_json_reports_a_stable_inspectable_plan_without_mutation() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "json-preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+
+    let preview = repo.wt(&repo.root, ["rm", "json-preview", "--dry-run", "--json"]);
+
+    assert_success(&preview);
+    let preview: Value =
+        serde_json::from_slice(&preview.stdout).expect("valid removal preview JSON");
+    assert_eq!(preview["dry_run"], true);
+    assert_eq!(preview["name"], "json-preview");
+    assert_eq!(preview["path"], path);
+    assert_eq!(preview["branch"], "json-preview");
+    assert_eq!(preview["base"], "main");
+    assert_eq!(preview["branch_deleted"], true);
+    assert_eq!(preview["branch_retained"], false);
+    assert_eq!(preview["force_worktree_authorized"], false);
+    assert_eq!(preview["force_worktree_required"], false);
+    assert_eq!(preview["force_branch_authorized"], false);
+    assert_eq!(preview["force_branch_required"], false);
+    assert_eq!(preview["branch_merge_status"], "merged");
+    assert_eq!(preview["worktree_dirty"], false);
+    assert_eq!(preview["worktree_locked"], false);
+    assert!(std::path::Path::new(&path).is_dir());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/json-preview"],
+    );
+    assert_success(&branch);
+    let resolved = repo.wt(&repo.root, ["path", "json-preview"]);
+    assert_success(&resolved);
+    assert_eq!(stdout(&resolved), format!("{path}\n"));
+}
+
+#[test]
+fn force_branch_bypasses_a_deleted_base_for_preview_and_actual_removal() {
+    let repo = TestRepo::new();
+    assert_success(&repo.git(&repo.root, ["branch", "deleted-base"]));
+    let created = repo.wt(
+        &repo.root,
+        [
+            "new",
+            "stale-base",
+            "--base",
+            "deleted-base",
+            "--print-path",
+        ],
+    );
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    assert_success(&repo.git(&repo.root, ["branch", "-D", "deleted-base"]));
+
+    let preview = repo.wt(
+        &repo.root,
+        ["rm", "stale-base", "--dry-run", "--force-branch"],
+    );
+    assert_success(&preview);
+    assert!(stdout(&preview).contains("Nothing changed (dry run)"));
+    assert!(std::path::Path::new(&path).is_dir());
+
+    let removed = repo.wt(&repo.root, ["rm", "stale-base", "--force-branch"]);
+    assert_success(&removed);
+    assert!(!std::path::Path::new(&path).exists());
+    let branch = repo.git(
+        &repo.root,
+        ["show-ref", "--verify", "refs/heads/stale-base"],
+    );
+    assert!(!branch.status.success(), "forced branch was retained");
+}
+
+#[test]
+fn force_branch_bypasses_base_discovery_errors_for_preview_and_actual_removal() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "preview", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    let common_dir = repo.git(
+        &repo.root,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    assert_success(&common_dir);
+    let metadata_dir = std::path::Path::new(stdout(&common_dir).trim()).join("wt/sessions");
+    fs::remove_file(metadata_dir.join("70726576696577.json")).expect("remove target metadata");
+    fs::write(metadata_dir.join("unrelated.json"), b"not valid JSON\n")
+        .expect("write malformed unrelated metadata");
+
+    let refused = repo.wt(&repo.root, ["rm", "preview", "--dry-run"]);
+    assert_failure(&refused, "expected ident");
+    assert_eq!(
+        stderr(&refused),
+        "error: could not encode JSON output: expected ident at line 1 column 2\n"
+    );
+    assert!(std::path::Path::new(&path).is_dir());
+
+    let preview = repo.wt(
+        &repo.root,
+        ["rm", "preview", "--dry-run", "--force-branch", "--json"],
+    );
+    assert_success(&preview);
+    let preview: Value =
+        serde_json::from_slice(&preview.stdout).expect("valid removal preview JSON");
+    assert_eq!(preview["base"], Value::Null);
+    assert_eq!(preview["branch_merge_status"], "unknown");
+    assert_eq!(preview["force_branch_authorized"], true);
+    assert_eq!(preview["force_branch_required"], true);
+    assert!(std::path::Path::new(&path).is_dir());
+
+    let removed = repo.wt(&repo.root, ["rm", "preview", "--force-branch"]);
+    assert_success(&removed);
+    assert!(!std::path::Path::new(&path).exists());
+    let branch = repo.git(&repo.root, ["show-ref", "--verify", "refs/heads/preview"]);
+    assert!(!branch.status.success(), "forced branch was retained");
+}
+
+#[test]
+fn forced_preview_reports_unknown_merge_status_for_an_unresolvable_base() {
+    let repo = TestRepo::new();
+    assert_success(&repo.git(&repo.root, ["branch", "deleted-preview-base"]));
+    let created = repo.wt(
+        &repo.root,
+        [
+            "new",
+            "unknown-merge",
+            "--base",
+            "deleted-preview-base",
+            "--print-path",
+        ],
+    );
+    assert_success(&created);
+    assert_success(&repo.git(&repo.root, ["branch", "-D", "deleted-preview-base"]));
+
+    let human = repo.wt(
+        &repo.root,
+        ["rm", "unknown-merge", "--dry-run", "--force-branch"],
+    );
+    assert_success(&human);
+    assert!(stdout(&human).contains("Branch merge: unknown"));
+    assert!(stdout(&human).contains("Branch force: authorized (required: unknown)"));
+    assert!(!stdout(&human).contains("required: unmerged"));
+
+    let json = repo.wt(
+        &repo.root,
+        [
+            "rm",
+            "unknown-merge",
+            "--dry-run",
+            "--force-branch",
+            "--json",
+        ],
+    );
+    assert_success(&json);
+    let json: Value = serde_json::from_slice(&json.stdout).expect("valid removal preview JSON");
+    assert_eq!(json["branch_merge_status"], "unknown");
+    assert_eq!(json["force_branch_required"], true);
+}
+
+#[test]
 fn removal_refuses_unmerged_commits_but_supports_keep_branch_and_force_branch() {
     let repo = TestRepo::new();
     let created = repo.wt(&repo.root, ["new", "unmerged", "--print-path"]);
@@ -239,6 +571,44 @@ fn removal_refuses_unmerged_commits_but_supports_keep_branch_and_force_branch() 
     assert!(!std::path::Path::new(&forced_path).exists());
     let branch = repo.git(&repo.root, ["show-ref", "--verify", "refs/heads/forced"]);
     assert!(!branch.status.success(), "force did not delete branch");
+}
+
+#[test]
+fn forced_dry_run_preserves_a_worktree_lock() {
+    let repo = TestRepo::new();
+    let created = repo.wt(&repo.root, ["new", "lock-preserved", "--print-path"]);
+    assert_success(&created);
+    let path = stdout(&created).trim().to_owned();
+    assert_success(&repo.git(&repo.root, ["worktree", "lock", &path]));
+
+    let preview = repo.wt(
+        &repo.root,
+        [
+            "rm",
+            "lock-preserved",
+            "--dry-run",
+            "--force-worktree",
+            "--keep-branch",
+        ],
+    );
+    assert_success(&preview);
+    assert!(stdout(&preview).contains("Worktree force: authorized (required: locked)"));
+
+    let listed = repo.wt(&repo.root, ["ls", "--json"]);
+    assert_success(&listed);
+    let listed: Value = serde_json::from_slice(&listed.stdout).expect("valid list JSON");
+    let session = listed
+        .as_array()
+        .expect("session list")
+        .iter()
+        .find(|session| session["name"] == "lock-preserved")
+        .expect("locked session remains listed");
+    assert_eq!(session["locked"], true);
+    assert_eq!(session["status"], "locked");
+
+    let refused = repo.wt(&repo.root, ["rm", "lock-preserved", "--keep-branch"]);
+    assert_failure(&refused, "worktree 'lock-preserved' is locked");
+    assert!(std::path::Path::new(&path).is_dir());
 }
 
 #[test]

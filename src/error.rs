@@ -26,10 +26,12 @@ pub enum Error {
     #[error("worktree path '{}' already exists", .0.display())]
     WorktreePathExists(PathBuf),
 
-    #[error("worktree '{0}' has uncommitted changes")]
+    #[error("worktree '{0}' has uncommitted changes; use --force-worktree or --force")]
     WorktreeDirty(String),
 
-    #[error("branch '{branch}' contains commits not merged into '{base}'")]
+    #[error(
+        "branch '{branch}' contains commits not merged into '{base}'; use --force-branch or --force"
+    )]
     BranchNotMerged { branch: String, base: String },
 
     #[error("worktree '{0}' is locked")]

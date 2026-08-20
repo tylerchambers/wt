@@ -71,6 +71,10 @@ pub struct StatusArgs {
 pub struct RemoveArgs {
     pub name: String,
 
+    /// Validate and report removal without changing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+
     /// Remove the worktree but retain its branch.
     #[arg(long, conflicts_with_all = ["force_branch", "force"])]
     pub keep_branch: bool,
