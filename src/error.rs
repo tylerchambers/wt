@@ -49,6 +49,11 @@ pub enum Error {
     #[error("configuration error: {0}")]
     Configuration(String),
 
+    #[error(
+        "parent-shell directory changes require shell integration; run eval \"$(wt shell-init <shell>)\""
+    )]
+    ShellIntegrationRequired,
+
     #[error("git command failed: git {args}: {stderr}")]
     GitCommandFailed { args: String, stderr: String },
 

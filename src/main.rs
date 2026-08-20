@@ -4,6 +4,7 @@ mod error;
 mod git;
 mod metadata;
 mod session;
+mod shell;
 
 use std::env;
 use std::io::{self, Write};
@@ -27,10 +28,20 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    if let Command::ShellInit(ref args) = cli.command {
+        print!("{}", shell::init(args.shell));
+        return Ok(());
+    }
+    if let Command::New(args) = &cli.command
+        && args.cd
+    {
+        return Err(error::Error::ShellIntegrationRequired);
+    }
     let cwd =
         env::current_dir().map_err(|source| error::Error::io("could not read cwd", source))?;
     let manager = SessionManager::discover(&cwd)?;
     match cli.command {
+        Command::ShellInit(_) => unreachable!("shell-init returned before repository discovery"),
         Command::New(args) => {
             let created =
                 manager.new_session(&args.name, args.branch.as_deref(), args.base.as_deref())?;

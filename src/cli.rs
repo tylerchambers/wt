@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "wt", version, about = "Fast, safe Git worktree sessions")]
@@ -9,6 +9,8 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Print shell integration code.
+    ShellInit(ShellInitArgs),
     /// Create a worktree session.
     New(NewArgs),
     /// List repository worktrees.
@@ -27,6 +29,17 @@ pub enum Command {
     Prune(PruneArgs),
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum Shell {
+    Bash,
+    Zsh,
+}
+
+#[derive(Debug, Args)]
+pub struct ShellInitArgs {
+    pub shell: Shell,
+}
+
 #[derive(Debug, Args)]
 pub struct NewArgs {
     pub name: String,
@@ -40,12 +53,16 @@ pub struct NewArgs {
     pub branch: Option<String>,
 
     /// Emit a JSON object.
-    #[arg(long, conflicts_with = "print_path")]
+    #[arg(long, conflicts_with_all = ["print_path", "cd"])]
     pub json: bool,
 
     /// Print only the absolute worktree path.
-    #[arg(long, conflicts_with = "json")]
+    #[arg(long, conflicts_with_all = ["json", "cd"])]
     pub print_path: bool,
+
+    /// Enter the worktree in an initialized interactive shell.
+    #[arg(long, conflicts_with_all = ["json", "print_path"])]
+    pub cd: bool,
 }
 
 #[derive(Debug, Args)]

@@ -6,17 +6,24 @@ A fast, single-binary CLI for Git worktree development sessions.
 
 ## ⚡ Quickstart
 
-From anywhere inside a Git repository:
+Add the built-in integration to your Bash or Zsh startup file:
 
 ```bash
-wt new fix-auth-race
+# ~/.bashrc
+eval "$(wt shell-init bash)"
+
+# ~/.zshrc
+eval "$(wt shell-init zsh)"
 ```
 
-This creates a branch and linked worktree, then prints the worktree path. Enter it with:
+Then, from anywhere inside a Git repository:
 
 ```bash
-cd "$(wt path fix-auth-race)"
+wt new fix-auth-race --cd
 ```
+
+This creates the branch and linked worktree, then changes the initialized calling shell to
+the new worktree directory.
 
 Create multiple isolated sessions:
 
@@ -82,6 +89,7 @@ The installed binary has no runtime dependency beyond `git`.
 wt new <name>
 wt new <name> --base main
 wt new <name> --branch tyler/custom-branch
+wt new <name> --base main --cd
 ```
 
 Base precedence:
@@ -90,7 +98,18 @@ Base precedence:
 2. configured `default_base`
 3. the current branch, or the current commit when detached
 
-For scripts and agents, print only the absolute path:
+For interactive Bash and Zsh sessions, initialize the shell once and use `--cd`:
+
+```bash
+eval "$(wt shell-init zsh)" # use bash in ~/.bashrc
+wt new fix-auth-race --base main --cd
+```
+
+The shell function delegates ordinary `wt` commands unchanged. It handles only
+`wt new ... --cd`, creating the session first and changing directory only after success.
+`--cd` cannot be combined with `--json` or `--print-path`.
+
+For scripts and agents, keep using `--print-path` to print only the absolute path:
 
 ```bash
 DIR="$(wt new agent-auth-fix --base main --print-path)"
@@ -121,13 +140,20 @@ wt cd fix-auth-race
 
 Both commands print exactly the absolute worktree path. A subprocess cannot change its parent shell directory, so `wt cd` deliberately prints rather than pretending to change directories.
 
-Optional shell helper:
+For interactive creation and entry, use the built-in Bash or Zsh helper rather than a
+custom alias or function. Add one line to the matching startup file:
 
 ```bash
-wtcd() {
-    cd "$(wt path "$1")"
-}
+# ~/.bashrc
+eval "$(wt shell-init bash)"
+
+# ~/.zshrc
+eval "$(wt shell-init zsh)"
 ```
+
+After restarting the shell (or evaluating the line in the current shell),
+`wt new <name> --cd` enters the exact path created by `wt new`. Existing sessions can
+still be resolved with `wt path` or `wt cd`; those commands remain path-printing helpers.
 
 ### Inspect the current session
 
